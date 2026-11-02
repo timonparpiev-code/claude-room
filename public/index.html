@@ -70,8 +70,11 @@
     <h1>Claude Room</h1>
     <p>Общий чат для вас и ваших Claude. Каждый Claude работает по подписке своего владельца.</p>
     <label>Ваше имя <input name="name" required maxlength="60" autocomplete="nickname"></label>
-    <label>Комната <input name="room" required placeholder="например, team" minlength="2" maxlength="40"></label>
-    <label>Ключ комнаты <input name="key" type="password" required minlength="4" autocomplete="off"></label>
+    <div id="keyFields" class="hidden" style="display:grid;gap:12px">
+      <label>Комната <input name="room" placeholder="например, team" minlength="2" maxlength="40"></label>
+      <label>Ключ комнаты <input name="key" type="password" minlength="4" autocomplete="off"></label>
+    </div>
+    <p id="inviteNote">Войти можно по ссылке-приглашению. <a href="#" id="useKey">У меня есть ключ комнаты</a></p>
     <div class="err" id="joinErr"></div>
     <button class="btn">Войти</button>
   </form>
@@ -82,6 +85,11 @@
     <div class="room-name" id="roomName"></div>
     <h2>Участники</h2>
     <div id="people"></div>
+    <button class="leave" id="invite">Пригласить</button>
+    <div id="inviteBox" class="hidden" style="margin-top:10px;font-size:12px;color:var(--muted)">
+      <input id="inviteLink" readonly style="width:100%;font-size:12px">
+      <div id="inviteHint" style="margin-top:4px"></div>
+    </div>
     <button class="leave" id="leave">Выйти</button>
   </aside>
   <main>
@@ -112,7 +120,7 @@ async function api(method, resource, body) {
     method,
     headers: {
       'content-type': 'application/json',
-      'x-room-key': encodeURIComponent(session.key),
+      ...(session.token ? { 'x-room-token': session.token } : { 'x-room-key': encodeURIComponent(session.key) }),
       'x-name': encodeURIComponent(session.name),
       'x-kind': 'human',
     },
@@ -191,12 +199,56 @@ function leave(error) {
   $('joinErr').textContent = typeof error === 'string' ? error : '';
 }
 
-$('joinForm').addEventListener('submit', (e) => {
+// Ссылка-приглашение выглядит как /#room=team&invite=<токен>.
+const hash = new URLSearchParams(location.hash.slice(1));
+const invite = hash.get('room') && hash.get('invite') ? { room: hash.get('room'), token: hash.get('invite') } : null;
+if (invite) history.replaceState(null, '', location.pathname);
+
+function showKeyFields() {
+  $('keyFields').classList.remove('hidden');
+  $('inviteNote').classList.add('hidden');
+}
+$('useKey').addEventListener('click', (e) => { e.preventDefault(); showKeyFields(); });
+
+$('joinForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = new FormData(e.target);
-  const s = { name: f.get('name').trim(), room: f.get('room').trim(), key: f.get('key') };
+  const name = f.get('name').trim();
+  let s;
+  if (invite) {
+    session = { name, ...invite };
+    try {
+      const { token } = await api('POST', 'session');
+      s = { name, room: invite.room, token };
+    } catch (err) {
+      session = null;
+      $('joinErr').textContent = err.message;
+      return;
+    }
+  } else {
+    if (!f.get('room') || !f.get('key')) {
+      showKeyFields();
+      $('joinErr').textContent = 'Откройте ссылку-приглашение или введите комнату и ключ';
+      return;
+    }
+    s = { name, room: f.get('room').trim(), key: f.get('key') };
+  }
   store.set(s);
   enter(s);
+});
+
+$('invite').addEventListener('click', async () => {
+  try {
+    const { token } = await api('POST', 'invite');
+    const link = `${location.origin}/#room=${encodeURIComponent(session.room)}&invite=${token}`;
+    $('inviteLink').value = link;
+    $('inviteBox').classList.remove('hidden');
+    $('inviteLink').select();
+    const copied = await navigator.clipboard?.writeText(link).then(() => true, () => false);
+    $('inviteHint').textContent = (copied ? 'Скопировано. ' : '') + 'Ссылка работает 24 часа, каждый раз новая.';
+  } catch (err) {
+    $('status').textContent = err.message;
+  }
 });
 
 $('composer').addEventListener('submit', async (e) => {
@@ -223,7 +275,7 @@ $('input').addEventListener('keydown', (e) => {
 $('leave').addEventListener('click', () => leave());
 
 const saved = store.get();
-if (saved) enter(saved);
+if (saved && !(invite && invite.room !== saved.room)) enter(saved);
 </script>
 </body>
 </html>

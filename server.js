@@ -2,7 +2,7 @@
 // Сам Claude здесь не вызывается — хаб только пересылает сообщения.
 import http from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -46,12 +46,38 @@ function scheduleSave() {
   }, 300);
 }
 
-// Первый, кто зашёл в комнату, задаёт её ключ. Дальше вход только с тем же ключом.
-function openRoom(name, key) {
+// Токены входа подписываются хешем ключа комнаты: переживают перезапуск хаба
+// (ключ восстанавливает Claude владельца при подключении) и сгорают при смене ключа.
+const INVITE_TTL = 24 * 3600_000; // ссылка-приглашение
+const MEMBER_TTL = 30 * 24 * 3600_000; // вход в браузере после перехода по ссылке
+
+function signToken(room, type, ttl) {
+  const body = `${type}.${Date.now() + ttl}`;
+  return `${body}.${createHmac('sha256', room.keyHash).update(body).digest('base64url')}`;
+}
+
+function checkToken(room, token) {
+  const [type, exp, sig] = token.split('.');
+  if (!['invite', 'member'].includes(type) || !sig) return null;
+  const want = createHmac('sha256', room.keyHash).update(`${type}.${exp}`).digest();
+  const got = Buffer.from(sig, 'base64url');
+  if (got.length !== want.length || !timingSafeEqual(got, want)) return null;
+  if (Date.now() > Number(exp)) throw new HttpError(401, 'Ссылка устарела — попросите новую');
+  return type;
+}
+
+// Первый, кто зашёл в комнату с ключом, задаёт её ключ. Дальше вход с тем же ключом или по ссылке.
+function openRoom(name, key, token) {
   if (!/^[\p{L}\p{N}_-]{2,40}$/u.test(name)) {
     throw new HttpError(400, 'Название комнаты: 2–40 символов (буквы, цифры, _ или -)');
   }
-  if (!key || key.length < 4) throw new HttpError(401, 'Нужен ключ комнаты (минимум 4 символа)');
+  if (token) {
+    const room = rooms.get(name);
+    if (!room) throw new HttpError(503, 'Комната ещё не открыта: подождите, пока подключится Claude владельца');
+    if (!checkToken(room, token)) throw new HttpError(403, 'Неверная ссылка');
+    return room;
+  }
+  if (!key || key.length < 4) throw new HttpError(401, 'Нужна ссылка-приглашение или ключ комнаты');
   let room = rooms.get(name);
   if (!room) {
     room = { keyHash: sha(key), seq: 0, messages: [], participants: new Map(), waiters: new Set() };
@@ -140,10 +166,17 @@ function send(res, status, body, type = 'application/json; charset=utf-8') {
 }
 
 async function handleRoom(req, res, url, roomName, resource) {
-  const room = openRoom(roomName, header(req, 'x-room-key'));
+  const room = openRoom(roomName, header(req, 'x-room-key'), header(req, 'x-room-token'));
   const me = identify(req, room);
 
   if (resource === 'participants') return send(res, 200, { participants: participantsOf(room) });
+  if (resource === 'invite' && req.method === 'POST') {
+    return send(res, 201, { token: signToken(room, 'invite', INVITE_TTL), expiresIn: INVITE_TTL });
+  }
+  // Обмен ссылки-приглашения на долгий вход для этого браузера.
+  if (resource === 'session' && req.method === 'POST') {
+    return send(res, 201, { token: signToken(room, 'member', MEMBER_TTL) });
+  }
 
   if (req.method === 'POST') {
     const body = await readBody(req);
@@ -175,7 +208,7 @@ const STATIC = {
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost');
-    const match = url.pathname.match(/^\/api\/rooms\/([^/]+)\/(messages|participants)$/);
+    const match = url.pathname.match(/^\/api\/rooms\/([^/]+)\/(messages|participants|invite|session)$/);
     if (match) return await handleRoom(req, res, url, decodeURIComponent(match[1]), match[2]);
     if (url.pathname === '/health') return send(res, 200, { ok: true });
     const file = STATIC[url.pathname];
