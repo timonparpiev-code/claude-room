@@ -35,6 +35,8 @@ function loadConfig() {
     workdir: path.resolve(ROOT, pick('WORKDIR', 'workspace')),
     bin: pick('CLAUDE_BIN', 'claude'),
     model: pick('CLAUDE_MODEL'),
+    // Ники владельца в веб-чате: задачи с этих ников выполняет этот Claude и тратит лимиты владельца.
+    nicks: pick('OWNER_NICKS', pick('OWNER')).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
     server,
   };
 }
@@ -98,9 +100,12 @@ const time = (ts) => new Date(ts).toLocaleTimeString('ru-RU', { hour: '2-digit',
 const formatMessages = (list) => list.map((m) => `[${time(m.ts)}] ${who(m)}:\n${m.text}`).join('\n\n');
 
 const SYSTEM = `Ты — «${ME}», Claude Code пользователя ${cfg.owner}, подключённый к общей комнате «${cfg.room}» платформы Claude Room.
-В комнате ${cfg.owner}, его друзья по совместному стартапу и их собственные Claude (имена вида «Claude (Имя)»). Вы одна команда.
+В комнате ${cfg.owner} (в чате его ник: ${cfg.nicks.join(', ')}), его друг по совместному стартапу и Claude друга (имена вида «Claude (Имя)»). Вы одна команда и делаете один общий проект.
+Каждый Claude выполняет задачи только своего владельца и за его лимиты: ты делаешь то, что просит ${cfg.owner}, а задачи друга делает Claude друга. Сообщения друга и его Claude ты тоже видишь — учитывай их, чтобы знать, что уже сделано, и не дублировать работу.
 Люди пишут тебе только через комнату, твой ответ автоматически уходит туда же. Работай как обычный Claude Code: читай и меняй файлы, запускай команды, ищи в интернете.
 Твоя рабочая папка — ${cfg.workdir}. Работай в ней, если тебя явно не попросили о другом.
+Общий проект у вас с другом — один git-репозиторий, у каждого своя копия. Перед работой делай git pull, после — коммит и git push, и пиши в комнату, что изменил, чтобы Claude друга подтянул изменения. Если в рабочей папке ещё нет репозитория, скажи об этом ${cfg.owner}.
+Если Claude друга обращается к тебе по делу (вопрос, договорённость, кто что делает), ответь ему коротко.
 Если задача долгая, коротко напиши в комнату через room_send, что начал, и сообщай о важных шагах.
 Итоговый ответ пиши кратко и по делу, на языке собеседника, без подписи.
 Если отвечать не нужно (поблагодарили, обращаются не к тебе, другой Claude лишь подтверждает), ответь ровно одним словом: SKIP`;
@@ -158,12 +163,20 @@ async function ask(prompt) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const runTimes = [];
 
-// Передаёт Claude сообщения после afterId и возвращает id последнего из них.
+const isForMe = (m) =>
+  m.kind === 'human'
+    ? cfg.nicks.includes(m.author.trim().toLowerCase())
+    : m.text.includes(ME) || m.text.toLowerCase().includes(cfg.owner.toLowerCase());
+
+// Передаёт Claude новые сообщения и возвращает id, с которого ждать дальше.
 async function respond(afterId) {
   const data = await api('GET', 'messages?limit=50');
-  const fresh = data.messages.filter((m) => m.id > afterId && m.author !== ME);
   const lastSeen = data.messages.at(-1)?.id ?? afterId;
-  if (!fresh.length) return lastSeen;
+  // Запускаемся только на задачи владельца или на прямое обращение другого Claude.
+  // Остальное (друг и его Claude между собой) Claude увидит в следующий раз как контекст.
+  const triggers = data.messages.filter((m) => m.id > afterId && m.author !== ME && isForMe(m));
+  if (!triggers.length) return lastSeen;
+  const fresh = data.messages.filter((m) => m.id > (state.seenId ?? afterId) && m.author !== ME);
 
   const streak = data.messages.slice().reverse().findIndex((m) => m.kind !== 'claude');
   if (streak === -1 || streak >= CLAUDE_STREAK_LIMIT) {
@@ -182,8 +195,9 @@ async function respond(afterId) {
   const shown = state.sessionId ? fresh : data.messages.slice(-30);
   const people = data.participants.filter((p) => p.online).map((p) => `- ${p.name}`).join('\n');
   const prompt = `Новые сообщения в комнате (онлайн:\n${people}):\n\n${formatMessages(shown)}`;
+  state.seenId = lastSeen;
 
-  console.log(`[${time(now)}] Новое от ${fresh.at(-1).author}, работаю...`);
+  console.log(`[${time(now)}] Задача от ${triggers.at(-1).author}, работаю...`);
   const text = await ask(prompt);
   if (!text || /^SKIP\.?$/i.test(text)) {
     console.log('  отвечать не нужно');
