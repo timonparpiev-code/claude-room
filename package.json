@@ -1,0 +1,12 @@
+{
+  "name": "claude-room",
+  "version": "0.1.0",
+  "description": "Общая комната для людей и их Claude Code (каждый по своей подписке)",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

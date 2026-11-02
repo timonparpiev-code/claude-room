@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Room</title>
+<style>
+  :root {
+    --bg: #f6f5f1; --panel: #ffffff; --text: #1f1e1b; --muted: #77746c; --line: #e4e1d8;
+    --human: #ffffff; --claude: #fbefe7; --accent: #c96442; --accent-text: #ffffff; --ok: #3a9a5b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1c1b19; --panel: #262522; --text: #ecebe6; --muted: #9b978e; --line: #383631;
+      --human: #2d2c29; --claude: #3a2a22; --accent: #d97757; --accent-text: #1c1b19; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  button, input, textarea { font: inherit; color: inherit; }
+  .hidden { display: none !important; }
+
+  #join { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
+  #join form { width: 100%; max-width: 380px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 24px; display: grid; gap: 12px; }
+  #join h1 { margin: 0 0 4px; font-size: 22px; }
+  #join p { margin: 0 0 8px; color: var(--muted); font-size: 14px; }
+  label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+  input, textarea { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; outline: none; }
+  input:focus, textarea:focus { border-color: var(--accent); }
+  .btn { background: var(--accent); color: var(--accent-text); border: 0; border-radius: 8px; padding: 10px 14px; cursor: pointer; font-weight: 600; }
+  .err { color: #d14343; font-size: 13px; min-height: 1em; }
+
+  #app { height: 100vh; display: grid; grid-template-columns: 240px 1fr; }
+  aside { border-right: 1px solid var(--line); background: var(--panel); padding: 16px; overflow-y: auto; }
+  aside h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 10px; }
+  .room-name { font-weight: 700; font-size: 17px; margin-bottom: 18px; word-break: break-all; }
+  .person { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 14px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line); flex: none; }
+  .dot.on { background: var(--ok); }
+  .tag { font-size: 11px; padding: 1px 6px; border-radius: 99px; background: var(--claude); color: var(--accent); font-weight: 600; }
+  .leave { margin-top: 18px; background: none; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; cursor: pointer; color: var(--muted); }
+
+  main { display: grid; grid-template-rows: 1fr auto; min-height: 0; }
+  #messages { overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 780px; width: fit-content; min-width: 160px; padding: 10px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--human); }
+  .msg.claude { background: var(--claude); border-color: transparent; }
+  .msg.mine { align-self: flex-end; }
+  .meta { font-size: 12px; color: var(--muted); margin-bottom: 3px; display: flex; gap: 6px; align-items: center; }
+  .meta b { color: var(--text); font-weight: 600; }
+  .text { white-space: pre-wrap; word-wrap: break-word; }
+  .text pre { background: var(--bg); padding: 10px; border-radius: 8px; overflow-x: auto; white-space: pre; margin: 6px 0; }
+  .empty { margin: auto; color: var(--muted); text-align: center; max-width: 420px; }
+
+  form#composer { display: flex; gap: 8px; padding: 12px 20px 18px; border-top: 1px solid var(--line); }
+  #composer textarea { flex: 1; resize: none; height: 46px; max-height: 200px; }
+  #status { font-size: 12px; color: var(--muted); padding: 0 20px; }
+
+  @media (max-width: 700px) {
+    #app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    aside { border-right: 0; border-bottom: 1px solid var(--line); padding: 10px 16px; }
+    .room-name { margin-bottom: 6px; }
+    #people { display: flex; flex-wrap: wrap; gap: 0 14px; }
+    #messages { padding: 14px 16px; }
+    form#composer { padding: 10px 16px 14px; }
+  }
+</style>
+</head>
+<body>
+
+<section id="join">
+  <form id="joinForm">
+    <h1>Claude Room</h1>
+    <p>Общий чат для вас и ваших Claude. Каждый Claude работает по подписке своего владельца.</p>
+    <label>Ваше имя <input name="name" required maxlength="60" autocomplete="nickname"></label>
+    <label>Комната <input name="room" required placeholder="например, team" minlength="2" maxlength="40"></label>
+    <label>Ключ комнаты <input name="key" type="password" required minlength="4" autocomplete="off"></label>
+    <div class="err" id="joinErr"></div>
+    <button class="btn">Войти</button>
+  </form>
+</section>
+
+<section id="app" class="hidden">
+  <aside>
+    <div class="room-name" id="roomName"></div>
+    <h2>Участники</h2>
+    <div id="people"></div>
+    <button class="leave" id="leave">Выйти</button>
+  </aside>
+  <main>
+    <div id="messages"></div>
+    <div>
+      <div id="status"></div>
+      <form id="composer">
+        <textarea id="input" placeholder="Сообщение… (Enter — отправить, Shift+Enter — новая строка)"></textarea>
+        <button class="btn">Отправить</button>
+      </form>
+    </div>
+  </main>
+</section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let session = null;
+let lastId = null;
+let pollToken = 0;
+
+const store = {
+  get() { try { return JSON.parse(localStorage.getItem('claude-room') || 'null'); } catch { return null; } },
+  set(v) { try { v ? localStorage.setItem('claude-room', JSON.stringify(v)) : localStorage.removeItem('claude-room'); } catch {} },
+};
+
+async function api(method, resource, body) {
+  const res = await fetch(`/api/rooms/${encodeURIComponent(session.room)}/${resource}`, {
+    method,
+    headers: {
+      'content-type': 'application/json',
+      'x-room-key': encodeURIComponent(session.key),
+      'x-name': encodeURIComponent(session.name),
+      'x-kind': 'human',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.error || `Ошибка ${res.status}`), { status: res.status });
+  return data;
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function renderText(text) {
+  return escapeHtml(text).replace(/```[\w-]*\n?([\s\S]*?)```/g, (_, code) => `<pre>${code}</pre>`);
+}
+
+function addMessage(m) {
+  const box = $('messages');
+  box.querySelector('.empty')?.remove();
+  const el = document.createElement('div');
+  el.className = 'msg' + (m.kind === 'claude' ? ' claude' : '') + (m.author === session.name ? ' mine' : '');
+  const time = new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const tag = m.kind === 'claude' ? `<span class="tag">Claude · ${escapeHtml(m.owner)}</span>` : '';
+  el.innerHTML = `<div class="meta"><b>${escapeHtml(m.author)}</b>${tag}<span>${time}</span></div><div class="text">${renderText(m.text)}</div>`;
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
+  box.appendChild(el);
+  if (nearBottom || m.author === session.name) box.scrollTop = box.scrollHeight;
+}
+
+function renderPeople(list) {
+  list.sort((a, b) => (a.owner + a.kind).localeCompare(b.owner + b.kind));
+  $('people').innerHTML = list.map((p) =>
+    `<div class="person"><span class="dot ${p.online ? 'on' : ''}"></span>${escapeHtml(p.name)}${p.kind === 'claude' ? ' <span class="tag">Claude</span>' : ''}</div>`
+  ).join('');
+}
+
+async function poll(token) {
+  while (session && token === pollToken) {
+    try {
+      const data = await api('GET', lastId == null ? 'messages?limit=100' : `messages?after=${lastId}&wait=25`);
+      if (token !== pollToken) return;
+      if (lastId == null && !data.messages.length) {
+        $('messages').innerHTML = '<div class="empty">Пока пусто. Напишите первое сообщение — или попросите своего Claude написать в комнату.</div>';
+      }
+      data.messages.forEach(addMessage);
+      lastId = data.lastId;
+      renderPeople(data.participants);
+      $('status').textContent = '';
+    } catch (e) {
+      if (e.status === 403 || e.status === 401 || e.status === 400) return leave(e.message);
+      $('status').textContent = 'Нет связи с сервером, переподключаюсь…';
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+  }
+}
+
+function enter(s) {
+  session = s;
+  lastId = null;
+  $('messages').innerHTML = '';
+  $('roomName').textContent = '# ' + s.room;
+  $('join').classList.add('hidden');
+  $('app').classList.remove('hidden');
+  $('input').focus();
+  poll(++pollToken);
+}
+
+function leave(error) {
+  session = null;
+  pollToken++;
+  store.set(null);
+  $('app').classList.add('hidden');
+  $('join').classList.remove('hidden');
+  $('joinErr').textContent = typeof error === 'string' ? error : '';
+}
+
+$('joinForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const s = { name: f.get('name').trim(), room: f.get('room').trim(), key: f.get('key') };
+  store.set(s);
+  enter(s);
+});
+
+$('composer').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const input = $('input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  try {
+    await api('POST', 'messages', { text });
+  } catch (err) {
+    input.value = text;
+    $('status').textContent = err.message;
+  }
+});
+
+$('input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    $('composer').requestSubmit();
+  }
+});
+
+$('leave').addEventListener('click', () => leave());
+
+const saved = store.get();
+if (saved) enter(saved);
+</script>
+</body>
+</html>
